@@ -1,0 +1,23 @@
+CREATE EXTENSION IF NOT EXISTS pg_trgm;
+CREATE EXTENSION IF NOT EXISTS pgcrypto;
+
+CREATE TYPE userkind AS ENUM ('super', 'normal');
+
+CREATE TABLE users (
+  id UUID PRIMARY KEY NOT NULL DEFAULT gen_random_uuid(),
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  kind USERKIND NOT NULL DEFAULT 'normal',
+  email TEXT NOT NULL,
+  password TEXT NOT NULL,
+  nickname TEXT NOT NULL
+);
+
+CREATE UNIQUE INDEX ON users (email);
+
+CREATE TABLE cards (
+  id UUID PRIMARY KEY NOT NULL DEFAULT gen_random_uuid(),
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  rating DOUBLE PRECISION NOT NULL DEFAULT 1000.0,
+  owned_at TIMESTAMPTZ,
+  owner_id UUID
+);

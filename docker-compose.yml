@@ -1,0 +1,16 @@
+version: "3"
+
+services:
+  redis:
+    image: "redis:alpine"
+    expose:
+      - 6379
+  myservice:
+    build: .
+    ports:
+      - "8080:8080"
+    expose:
+      - 8080
+    command: server
+    environment:
+      - REDIS_ENDPOINT=redis://redis:6379
