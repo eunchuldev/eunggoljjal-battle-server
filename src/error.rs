@@ -25,6 +25,8 @@ pub enum Error {
     WrongPassword,
     #[error("bincode error: {0:?}")]
     BincodeError(#[from] bincode::Error),
+    #[error("serde_json error: {0:?}")]
+    SerdeJsonError(#[from] serde_json::Error),
     #[error("base64 error: {0:?}")]
     Base64Error(#[from] base64::DecodeError),
     #[error("io error: {0:?}")]

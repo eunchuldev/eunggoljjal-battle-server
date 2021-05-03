@@ -1,4 +1,4 @@
-use actix_web::{web, App, HttpServer};
+use actix_web::{App, HttpServer};
 use serde::Deserialize;
 mod error;
 mod model;
@@ -30,9 +30,9 @@ async fn main() -> Result<(), error::Error> {
 
     HttpServer::new(move || {
         App::new()
-            .data(web::Data::new(schema.clone()))
-            .data(web::Data::new(dbpool.clone()))
-            .data(web::Data::new(redispool.clone()))
+            .data(schema.clone())
+            .data(dbpool.clone())
+            .data(redispool.clone())
             .configure(routes::routes)
     })
     .bind("0.0.0.0:8000")?

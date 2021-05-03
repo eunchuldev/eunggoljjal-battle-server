@@ -7,16 +7,27 @@ use async_graphql::{
     connection::{Connection, CursorType, Edge, EmptyFields},
     Context, EmptySubscription, Enum, Error as GraphqlError, Object, Schema as GraphqlSchema,
     SimpleObject,
+    validators::IntRange,
 };
-pub use deadpool_redis::{Config as RedisConfig, Pool as RedisPool};
+use chrono::{TimeZone, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
+use lazy_static::lazy_static;
+pub use deadpool_redis::{Config as RedisConfig, Pool as RedisPool};
 
 pub use error::Error;
 
-type DateTime = chrono::DateTime<chrono::Utc>;
+type DateTime = chrono::DateTime<Utc>;
 pub type DbPool = sqlx::postgres::PgPool;
 pub type DbPoolOptions = sqlx::postgres::PgPoolOptions;
+
+lazy_static! {
+    static ref MAX_DATETIME: DateTime = Utc.ymd(9999, 1, 1).and_hms(0, 1, 1);
+    static ref MIN_DATETIME: DateTime = Utc.ymd(0, 1, 1).and_hms(0, 1, 1);
+}
+const MAX_RATING: f64 = 999999999.0;
+const MIN_RATING: f64 = -999999999.0;
+const MAX_PAGE_SIZE: i32 = 100;
 
 pub fn create_redispool(url: &str) -> Result<RedisPool, Error> {
     Ok(RedisConfig {
@@ -50,8 +61,14 @@ impl CursorType for CardCursor {
     }
 }
 
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq, Copy, Enum)]
+pub enum CardSort {
+    OwnedAt,
+    Rating
+}
+
 #[derive(sqlx::Type, Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq, Enum)]
-#[sqlx(rename = "userkind")]
+#[sqlx(type_name = "userkind")]
 pub enum UserKind {
     #[sqlx(rename = "super")]
     Super,
@@ -61,7 +78,6 @@ pub enum UserKind {
 
 #[derive(sqlx::FromRow, Clone, Debug, Deserialize, Serialize, PartialEq)]
 pub struct User {
-    #[serde(skip)]
     pub id: Uuid,
     #[serde(skip)]
     pub password: String,
@@ -101,9 +117,11 @@ impl User {
     async fn cards(
         &self,
         ctx: &Context<'_>,
+        sort: Option<CardSort>,
         after: Option<String>,
         before: Option<String>,
-        #[graphql(desc = "first N items. clamped by [0-100]")] first: Option<i32>,
+        #[graphql(validator(IntRange(min = "0", max = "100")))]
+        first: Option<i32>,
         #[graphql(desc = "last N items. clamped by [0-100]")] last: Option<i32>,
     ) -> Result<Connection<CardCursor, Card, EmptyFields, EmptyFields>, GraphqlError> {
         let dbpool = ctx.data::<DbPool>()?;
@@ -111,72 +129,62 @@ impl User {
             return Err(Error::BadRequest("cards", "first or last, not both").into());
         }
         let first = if first.is_none() && last.is_none() {
-            Some(100)
+            Some(MAX_PAGE_SIZE)
         } else {
             first
         };
-        let first = first.map(|l| l.min(100).max(0));
-        let last = last.map(|l| l.min(100).max(0));
+        let first = first.map(|l| l.min(MAX_PAGE_SIZE).max(0));
+        let last = last.map(|l| l.min(MAX_PAGE_SIZE).max(0));
+        let sort = sort.unwrap_or(CardSort::OwnedAt);
         async_graphql::connection::query(after, before, first, last, |after, before, first, last| async move {
-            let (after, before) = match (after, before) {
-                (Some(CardCursor::OwnedAt(after)), None) => (CardCursor::OwnedAt(after), CardCursor::OwnedAt(chrono::MAX_DATETIME)),
-                (None, Some(CardCursor::OwnedAt(before))) => (CardCursor::OwnedAt(chrono::MIN_DATETIME), CardCursor::OwnedAt(before)),
-                (Some(CardCursor::Rating(after)), None) => (CardCursor::Rating(after), CardCursor::Rating(f64::MAX)),
-                (None, Some(CardCursor::Rating(before))) => (CardCursor::Rating(f64::MIN), CardCursor::Rating(before)),
-                _ => (CardCursor::OwnedAt(chrono::MIN_DATETIME), CardCursor::OwnedAt(chrono::MAX_DATETIME))
+            let (after, before) = match sort {
+                CardSort::OwnedAt => (after.unwrap_or(CardCursor::OwnedAt(MIN_DATETIME.clone())), before.unwrap_or(CardCursor::OwnedAt(MAX_DATETIME.clone()))),
+                CardSort::Rating => (after.unwrap_or(CardCursor::Rating(MIN_RATING)), before.unwrap_or(CardCursor::Rating(MAX_RATING))),
             };
-            let cursor_kind = after.clone();
-            let cards = match (after, before, first, last) {
-                (CardCursor::OwnedAt(after), CardCursor::OwnedAt(before), Some(limit), None) => {
-                    Ok(sqlx::query_as::<_, Card>("SELECT * FROM cards WHERE owner_id = $1 AND owned_at > $2 AND owned_at < $3 ORDER BY owned_at ASC LIMIT $4")
+            let (sql_sorting, limit) = match (first, last) {
+                (Some(limit), None) => ("ASC", limit as i32),
+                (None, Some(limit)) => ("DESC", limit as i32),
+                _ => ("ASC", MAX_PAGE_SIZE),
+            };
+            let mut cards = match (sort, after, before) {
+                (CardSort::OwnedAt, CardCursor::OwnedAt(after), CardCursor::OwnedAt(before)) => {
+                    sqlx::query_as::<_, Card>(&format!("SELECT * FROM cards WHERE owner_id = $1 AND owned_at > $2 AND owned_at < $3 ORDER BY owned_at {} LIMIT $4 + 1", sql_sorting))
                         .bind(self.id)
                         .bind(after)
                         .bind(before)
-                        .bind(limit as i32)
+                        .bind(limit)
                         .fetch_all(dbpool)
-                        .await?)
+                        .await?
                 }
-                (CardCursor::OwnedAt(after), CardCursor::OwnedAt(before), None, Some(limit)) => {
-                    Ok(sqlx::query_as::<_, Card>("SELECT * FROM cards WHERE owner_id = $1 AND owned_at > $2 AND owned_at < $3 ORDER BY owned_at DESC LIMIT $4")
+                (CardSort::Rating, CardCursor::Rating(after), CardCursor::Rating(before)) => {
+                    sqlx::query_as::<_, Card>(&format!("SELECT * FROM cards WHERE owner_id = $1 AND rating > $2 AND rating < $3 ORDER BY rating {} LIMIT $4 + 1", sql_sorting))
                         .bind(self.id)
                         .bind(after)
                         .bind(before)
-                        .bind(limit as i32)
+                        .bind(limit)
                         .fetch_all(dbpool)
-                        .await?)
-                }
-                (CardCursor::Rating(after), CardCursor::Rating(before), Some(limit), None) => {
-                    Ok(sqlx::query_as::<_, Card>("SELECT * FROM cards WHERE owner_id = $1 AND rating > $2 AND rating < $3 ORDER BY rating ASC LIMIT $4")
-                        .bind(self.id)
-                        .bind(after)
-                        .bind(before)
-                        .bind(limit as i32)
-                        .fetch_all(dbpool)
-                        .await?)
-                }
-                (CardCursor::Rating(after), CardCursor::Rating(before), None, Some(limit)) => {
-                    Ok(sqlx::query_as::<_, Card>("SELECT * FROM cards WHERE owner_id = $1 AND rating > $2 AND rating < $3 ORDER BY rating DESC LIMIT $4")
-                        .bind(self.id)
-                        .bind(after)
-                        .bind(before)
-                        .bind(limit as i32)
-                        .fetch_all(dbpool)
-                        .await?)
+                        .await?
                 }
                 _ => {
-                    Err(Error::BadRequest("cards", "cursor type not match"))
+                    return Err(Error::BadRequest("cards", "sort format and cursor type not match").into());
                 }
-            }?;
+            };
             let mut connection = Connection::new(
-                last.filter(|limit| limit > &cards.len()).is_some(),
-                first.filter(|limit| limit > &cards.len()).is_some());
-            match cursor_kind {
-                CardCursor::OwnedAt(_) => {
+                last.filter(|limit| limit < &cards.len()).is_some(),
+                first.filter(|limit| limit < &cards.len()).is_some(),
+                );
+            cards.truncate(last.or(first).unwrap_or(MAX_PAGE_SIZE as usize));
+            if sql_sorting == "DESC" {
+                cards.reverse();
+            }
+            
+            match sort {
+                CardSort::OwnedAt => {
                     connection.append(
                         cards.into_iter().map(|card| Edge::new(CardCursor::OwnedAt(card.owned_at), card))
                     );
                 }
-                CardCursor::Rating(_) => {
+                CardSort::Rating => {
                     connection.append(
                         cards.into_iter().map(|card| Edge::new(CardCursor::Rating(card.rating), card))
                     );
@@ -273,7 +281,7 @@ pub mod tests {
     async fn test_migration_and_build_schema() {
         let docker = TestDocker::new();
         let db = docker.run().await;
-        let schema = db.schema.clone();
+        let _schema = db.schema.clone();
     }
     #[actix_rt::test]
     async fn test_register() {
@@ -349,5 +357,134 @@ pub mod tests {
                 .collect::<Vec<_>>(),
             vec!["wrong password"]
         );
+    }
+
+    #[actix_rt::test]
+    async fn test_cards_pagination_validation() {
+        let docker = TestDocker::new();
+        let db = docker.run().await;
+        let schema = db.schema.clone();
+        let user_id = uuid::Uuid::new_v4();
+        let query = format!(r#"query {{ 
+            user(id: "{}") {{ 
+                cards(first: 101) {{
+                    edges {{ node {{ ownedAt rating }} }} 
+                    pageInfo {{ endCursor hasNextPage hasPreviousPage }}
+                }}
+            }} 
+        }}"#, user_id);
+        let res = schema.execute(query).await;
+        assert_eq!(
+            res.errors
+                .into_iter()
+                .map(|t| t.to_string())
+                .collect::<Vec<_>>(),
+            vec![r#"Invalid value for argument "first", the value is 101, must be between 0 and 100"#]);
+
+    }
+    #[actix_rt::test]
+    async fn test_cards_pagination() {
+        let docker = TestDocker::new();
+        let db = docker.run().await;
+        let schema = db.schema.clone();
+        let user_id = uuid::Uuid::new_v4();
+        let dbpool = db.pgpool;
+        sqlx::query("INSERT INTO users (id, nickname, email, password) VALUES ($1, 'a', 'b', 'c')")
+            .bind(user_id)
+            .execute(&dbpool)
+            .await.unwrap();
+        let date = chrono::DateTime::parse_from_str("2020 Apr 13 12:09:14.274 +0000", "%Y %b %d %H:%M:%S%.3f %z").unwrap();
+        for i in 0..10 {
+            sqlx::query("INSERT INTO cards (rating, owned_at, owner_id) VALUES ($1, $2, $3)")
+                .bind(i as f32)
+                .bind(date - chrono::Duration::seconds(i))
+                .bind(user_id)
+                .execute(&dbpool)
+                .await.unwrap();
+        }
+        let query = format!(r#"query {{ 
+            user(id: "{}") {{ 
+                cards(first: 2) {{
+                    edges {{ node {{ ownedAt rating }} }} 
+                    pageInfo {{ endCursor hasNextPage hasPreviousPage }}
+                }}
+            }} 
+        }}"#, user_id);
+        let res = schema.execute(query).await;
+        let data = res.data;
+        assert_eq!(res.errors, Vec::new());
+        assert_eq!(
+            data,
+            value!( {
+                "user": {
+                    "cards": {
+                        "edges": [{
+                            "node": { "ownedAt": "2020-04-13T12:09:05.274+00:00", "rating": 9.0 }, 
+                        }, {
+                            "node": { "ownedAt": "2020-04-13T12:09:06.274+00:00", "rating": 8.0 }
+                        }],
+                        "pageInfo": {
+                            "endCursor": "AAAAABgAAAAAAAAAMjAyMC0wNC0xM1QxMjowOTowNi4yNzRa",
+                            "hasNextPage": true,
+                            "hasPreviousPage": false,
+                        }
+                    }
+            }} )
+        );
+        let mut data = data;
+        for _ in 0..4 {
+            let json = data.into_json().unwrap();
+            let last_cursor = json["user"]["cards"]["pageInfo"]["endCursor"].as_str().unwrap().to_string();
+            assert_eq!(
+                json["user"]["cards"]["pageInfo"]["hasNextPage"].as_bool().unwrap(),
+                true
+                );
+            let query = format!(r#"query {{ 
+                user(id: "{}") {{ 
+                    cards(first: 2, after: "{}") {{
+                        pageInfo {{ endCursor hasNextPage hasPreviousPage }}
+                    }}
+                }} 
+            }}"#, user_id, last_cursor);
+            let res = schema.execute(query).await;
+            data = res.data;
+        }
+        assert_eq!(
+            data.into_json().unwrap()["user"]["cards"]["pageInfo"]["hasNextPage"].as_bool().unwrap(),
+            false
+            );
+        let query = format!(r#"query {{ 
+            user(id: "{}") {{ 
+                cards(last: 2, sort: RATING) {{
+                    edges {{ node {{ rating }} }} 
+                    pageInfo {{ startCursor hasNextPage hasPreviousPage }}
+                }}
+            }} 
+        }}"#, user_id);
+        let res = schema.execute(query).await;
+        assert_eq!(res.errors, Vec::new());
+        let mut data = res.data;
+        for i in 0..4 {
+            let json = data.into_json().unwrap();
+            assert_eq!(json["user"]["cards"]["pageInfo"]["hasNextPage"].as_bool(), Some(false));
+            assert_eq!(json["user"]["cards"]["pageInfo"]["hasPreviousPage"].as_bool(), Some(true));
+            assert_eq!(json["user"]["cards"]["edges"][0]["node"]["rating"].as_f64(), Some(8.0 - (i*2) as f64));
+            let last_cursor = json["user"]["cards"]["pageInfo"]["startCursor"].as_str().unwrap().to_string();
+            let query = format!(r#"query {{ 
+                user(id: "{}") {{ 
+                    cards(last: 2, before: "{}", sort: RATING) {{
+                        edges {{ node {{ rating }} }}
+                        pageInfo {{ startCursor hasNextPage hasPreviousPage }}
+                    }}
+                }} 
+            }}"#, user_id, last_cursor);
+            let res = schema.execute(query).await;
+            assert_eq!(res.errors, Vec::new());
+            data = res.data;
+        }
+        assert_eq!(
+            data.into_json().unwrap()["user"]["cards"]["pageInfo"]["hasPreviousPage"].as_bool(),
+            Some(false)
+            );
     }
 }

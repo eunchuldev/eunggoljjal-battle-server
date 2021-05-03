@@ -47,7 +47,8 @@ impl<'a> TestNodes<'a> {
             .retain(|migration| !migration.description.ends_with(".down"));
         migrator.run(&dbpool).await.unwrap();
         TestNodes {
-            pg, redis,
+            pg,
+            redis,
             pgpool: dbpool.clone(),
             redispool: redispool.clone(),
             schema: build_schema(dbpool, redispool).await.unwrap(),

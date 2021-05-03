@@ -12,7 +12,7 @@ serde = { version = "1", features = ["derive"] }
 chrono = { version = "0.4", features = ["serde"] }
 thiserror = "1"
 sqlx = { version = "0.5.2", features = [ "runtime-actix-rustls", "postgres", "sqlite", "migrate", "chrono", "uuid" ] }
-#async-graphql = { version = "2.8.3", features = [ "chrono", "uuid" ], git="https://github.com/async-graphql/async-graphql", branch="actix-web-v4-beta" }
+# HACK: https://github.com/async-graphql/async-graphql/issues/489
 async-graphql = { version = "2.8.3", features = [ "chrono", "uuid" ], git="https://github.com/song9446/async-graphql", branch="actix-web-v4-beta"}
 uuid = { version = "0.8", features = ["serde", "v4", "std" ] }
 lazy_static = "*"
@@ -26,7 +26,7 @@ redis = { version = "0.20", default-features = false, features = ["aio", "tokio-
 rand = "0.8"
 actix-rt = "2"
 
-actix-web = "4.0.0-beta.5"
+actix-web = "4.0.0-beta.6"
 
 bincode = "1"
 base64 = "0.13"
@@ -44,7 +44,7 @@ thiserror = "1"
 sqlx = { version = "0.5.2", features = [ "runtime-actix-rustls", "postgres", "sqlite", "migrate", "chrono", "uuid" ] }
 deadpool-redis = { version = "0.7", features = ["config"] }
 redis = { version = "0.20", default-features = false, features = ["aio", "tokio-comp"] }
-actix-web = "4.0.0-beta.5"
+actix-web = "4.0.0-beta.6"
 bcrypt = "0.9"
 jsonwebtoken = "7"
 bincode = "1"

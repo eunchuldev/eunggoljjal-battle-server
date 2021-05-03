@@ -1,6 +1,6 @@
 use crate::error::Error;
 use crate::model::{User, UserKind};
-use actix_web::{HttpMessage, HttpRequest};
+use actix_web::HttpRequest;
 use deadpool_redis::{cmd, ConnectionWrapper as RedisConn, Pool as RedisPool};
 use rand::{distributions::Alphanumeric, thread_rng, Rng};
 use serde::{Deserialize, Serialize};

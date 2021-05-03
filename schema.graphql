@@ -15,7 +15,7 @@ type User {
 	"""
 	Cards owned by the user.
 	"""
-	cards(after: String, before: String, first: Int, last: Int): CardConnection!
+	cards(sort: CardSort, after: String, before: String, first: Int, last: Int): CardConnection!
 }
 enum UserKind {
 	SUPER
@@ -27,6 +27,10 @@ Implement the DateTime<Utc> scalar
 The input/output is a string in RFC3339 format.
 """
 scalar DateTime
+enum CardSort {
+	OWNED_AT
+	RATING
+}
 type CardConnection {
 	"""
 	Information to aid in pagination.

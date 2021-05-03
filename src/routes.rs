@@ -1,5 +1,5 @@
 use crate::error::Error;
-use crate::model::{Schema, RedisPool};
+use crate::model::{RedisPool, Schema};
 use crate::session::extract_session;
 use actix_web::{get, post, web, HttpRequest, HttpResponse, Result as ActixWebResult};
 use async_graphql::http::{playground_source, GraphQLPlaygroundConfig};
@@ -38,29 +38,111 @@ pub fn routes(cfg: &mut web::ServiceConfig) {
 mod tests {
     use super::*;
     use crate::test_util::*;
-    use actix_web::{test, App};
+    use actix_web::{http::header::IntoHeaderValue, test, App};
     //use async_graphql::{value, Name, Value};
 
     #[actix_rt::test]
-    async fn test_session_id_set() {
+    async fn test_session_id_cookie_set() {
         let docker = TestDocker::new();
         let db = docker.run().await;
-        
+
         let mut app = test::init_service(
             App::new()
-                .data(web::Data::new(db.schema.clone()))
-                .data(web::Data::new(db.pgpool.clone()))
-                .data(web::Data::new(db.redispool.clone()))
-                .configure(routes)
-            ).await;
+                .data(db.schema.clone())
+                .data(db.pgpool.clone())
+                .data(db.redispool.clone())
+                .configure(routes),
+        )
+        .await;
 
-        let query = r#"mutation { register(email:"a", password:"b", nickname:"c") }"#;
+        let query =
+            r#"{"query":"mutation { register(email:\"a\", password:\"b\", nickname:\"c\") }"}"#;
         let req = test::TestRequest::post()
+            .insert_header(("Content-Type", "application/json"))
             .uri("/graphql")
-            .set_payload(query).to_request();
+            .set_payload(query)
+            .to_request();
+        let resp = test::call_service(&mut app, req).await;
+        assert!(resp
+            .headers()
+            .get("Set-Cookie")
+            .unwrap()
+            .try_into_value()
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .starts_with("session-id="));
+    }
+    #[actix_rt::test]
+    async fn test_authorized_request() {
+        let docker = TestDocker::new();
+        let db = docker.run().await;
+
+        let mut app = test::init_service(
+            App::new()
+                .data(db.schema.clone())
+                .data(db.pgpool.clone())
+                .data(db.redispool.clone())
+                .configure(routes),
+        )
+        .await;
+
+        let query =
+            r#"{"query":"mutation { register(email:\"a\", password:\"b\", nickname:\"c\") }"}"#;
+        let req = test::TestRequest::post()
+            .insert_header(("Content-Type", "application/json"))
+            .uri("/graphql")
+            .set_payload(query)
+            .to_request();
+        let resp = test::call_service(&mut app, req).await;
+        let cookie_header = resp
+            .headers()
+            .get("Set-Cookie")
+            .unwrap()
+            .try_into_value()
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .to_string();
+        #[derive(serde::Deserialize)]
+        struct Data {
+            register: String,
+        }
+        #[derive(serde::Deserialize)]
+        struct Res {
+            data: Data,
+        }
+        let body: Res = serde_json::from_slice(test::read_body(resp).await.as_ref()).unwrap();
+        let user_id = body.data.register;
+
+        let query = format!(
+            r#"{{"query":"query {{ user(id:\"{}\") {{ email }} }}"}}"#,
+            user_id
+        );
+        let req = test::TestRequest::post()
+            .insert_header(("Content-Type", "application/json"))
+            .uri("/graphql")
+            .set_payload(query)
+            .to_request();
         let resp = test::call_service(&mut app, req).await;
         let body = test::read_body(resp).await;
-        assert_eq!(body, web::Bytes::from_static(b"data: 5\n\n"));
-        //assert!(resp.status().is_success());
+        assert!(String::from_utf8_lossy(body.as_ref())
+            .find("error")
+            .is_some());
+        let query = format!(
+            r#"{{"query":"query {{ user(id:\"{}\") {{ email }} }}"}}"#,
+            user_id
+        );
+        let req = test::TestRequest::post()
+            .insert_header(("Content-Type", "application/json"))
+            .insert_header(("COOKIE", cookie_header.split(";").next().unwrap()))
+            .uri("/graphql")
+            .set_payload(query)
+            .to_request();
+        let resp = test::call_service(&mut app, req).await;
+        let body = test::read_body(resp).await;
+        assert!(String::from_utf8_lossy(body.as_ref())
+            .find("error")
+            .is_none());
     }
 }
